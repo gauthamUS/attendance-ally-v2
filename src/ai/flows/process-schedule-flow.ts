@@ -17,10 +17,9 @@ const ProcessScheduleInputSchema = z.object({
     .describe(
       "A screenshot of the weekly class timetable, as a data URI that must include a MIME type and use Base64 encoding. Expected format: 'data:<mimetype>;base64,<encoded_data>'. The timetable has green slots for class periods."
     ),
-  academicCalendarDataUri: z
-    .string()
+  academicCalendarDataUris: z.array(z.string())
     .describe(
-      "The academic calendar as a data URI (must be a PDF) that includes a MIME type and uses Base64 encoding. The calendar lists instructional days, holidays, and exam periods."
+      "The academic calendar as an array of data URIs (images) that include a MIME type and use Base64 encoding. The calendar lists instructional days, holidays, and exam periods."
     ),
   courseCode: z.string().describe("The course code to look for in the timetable, e.g., 'BCSE301L'."),
 });
@@ -31,10 +30,16 @@ const NonInstructionalDaySchema = z.object({
     reason: z.string().describe("The reason for it being a non-instructional day, e.g., 'Holiday', 'CAT-I'."),
 });
 
+const DayOrderInstructionalDaySchema = z.object({
+    date: z.string().describe("The actual date of the class, e.g., 'August 2, 2025'."),
+    dayOfWeek: z.string().describe("The day of the week the schedule should follow, e.g., 'Tuesday'."),
+});
+
 const ProcessScheduleOutputSchema = z.object({
   classDays: z.array(z.string().describe("A list of weekdays, e.g., ['Tuesday', 'Thursday', 'Friday'].")).describe("List of weekdays for the course."),
   reason: z.string().optional().describe("Reasoning for the determined schedule or why it failed."),
   nonInstructionalDays: z.array(NonInstructionalDaySchema).optional().describe("A list of all identified holidays and non-instructional days."),
+  dayOrderInstructionalDays: z.array(DayOrderInstructionalDaySchema).optional().describe("A list of all identified day-order instructional days."),
   lastInstructionalDay: z.string().optional().describe("The last instructional day for theory classes, e.g., 'November 29, 2024'."),
 });
 export type ProcessScheduleOutput = z.infer<typeof ProcessScheduleOutputSchema>;
@@ -49,7 +54,7 @@ const schedulePrompt = ai.definePrompt({
     name: 'schedulePrompt',
     input: { schema: ProcessScheduleInputSchema },
     output: { schema: ProcessScheduleOutputSchema },
-    prompt: `You are an intelligent assistant for a university student. Your task is to determine the class schedule for a specific course based on a weekly timetable image and an academic calendar PDF.
+    prompt: `You are an intelligent assistant for a university student. Your task is to determine the class schedule for a specific course based on a weekly timetable image and a series of academic calendar images.
 
     **Analysis Steps:**
 
@@ -60,14 +65,20 @@ const schedulePrompt = ai.definePrompt({
         *   For each green box with an exact match, look at the very first column of that same row to identify the day of the week (e.g., MON, TUE, WED, THU, FRI).
         *   List the full weekdays that have classes for this course. For example: If classes are on TUE, THU, FRI, the output should be ["Tuesday", "Thursday", "Friday"].
 
-    2.  **Extract Non-Instructional Days from the Academic Calendar:**
-        *   Scan the academic calendar PDF thoroughly.
+    2.  **Extract Non-Instructional Days from the Academic Calendar Images:**
+        *   Scan all provided academic calendar images thoroughly.
         *   Identify all dates marked as "No instructional day", "Holiday", "Continuous Assessment Test - I", "Continuous Assessment Test - II", or "TechnoVIT".
         *   **Important**: If any of these are specified as a date range (e.g., "September 10-15" or "October 2-4"), keep the range as is in the output. Do not expand it.
         *   Create a list of all these dates. For each entry, provide the date (or date range) and the specific reason (e.g., "Holiday", "CAT-I").
 
-    3.  **Identify the Last Instructional Day:**
-        *   Find the date specified as the "Last Instructional Day for theory classes" in the calendar.
+    3. **Extract Day-Order Instructional Days from the Academic Calendar Images:**
+        *   Scan all provided academic calendar images thoroughly.
+        *   Look for any instructional day that is explicitly marked to follow the schedule of a different day. For example, a Saturday that is marked as "Tuesday Day Order".
+        *   For each one you find, extract the actual date (e.g., "August 2, 2025") and the day of the week it should follow (e.g., "Tuesday").
+        *   Populate the 'dayOrderInstructionalDays' array with these findings.
+
+    4.  **Identify the Last Instructional Day:**
+        *   Find the date specified as the "Last Instructional Day for theory classes" in the calendar images.
         *   Return this date in the 'lastInstructionalDay' field.
 
     **Output Format:**
@@ -75,14 +86,18 @@ const schedulePrompt = ai.definePrompt({
     *   Return a JSON object.
     *   In the 'classDays' array, provide the full names of the weekdays identified from the timetable.
     *   In the 'nonInstructionalDays' array, provide the list of dates/ranges and reasons you extracted.
+    *   In the 'dayOrderInstructionalDays' array, provide the list of special day-order dates.
     *   In the 'lastInstructionalDay' field, provide the date you found.
     *   In the 'reason' field, provide a brief summary of your findings, for example: "Based on the timetable, classes for {{{courseCode}}} are on Tuesdays, Thursdays, and Fridays."
     *   If you cannot find an exact match for the course code, return an empty 'classDays' array and explain the issue in the 'reason' field.
 
-    **Image and PDF Input:**
+    **Image and Document Input:**
 
     Weekly Timetable: {{media url=weeklyTimetableDataUri}}
-    Academic Calendar: {{media url=academicCalendarDataUri}}
+    Academic Calendar Images:
+    {{#each academicCalendarDataUris}}
+    {{media url=this}}
+    {{/each}}
     `,
 });
 
