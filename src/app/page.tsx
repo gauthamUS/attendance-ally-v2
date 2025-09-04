@@ -16,7 +16,6 @@ import { useToast } from '@/hooks/use-toast';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { format, eachDayOfInterval, getDay, parse, isAfter, isValid } from 'date-fns';
-import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 
@@ -50,6 +49,12 @@ type NonInstructionalDay = {
     reason: string;
 };
 
+type DayOrderInstructionalDay = {
+    date: string;
+    dayOfWeek: string;
+};
+
+
 const assessmentDates: { [key: string]: string } = {
     'cat1': '13.08.2025',
     'cat2': '30.09.2025',
@@ -61,8 +66,8 @@ const assessmentDates: { [key: string]: string } = {
 export default function AttendancePage() {
   const { toast } = useToast();
   const [courseName, setCourseName] = useState<string>('');
-  const [totalClassesInput, setTotalClassesInput] = useState<string>('');
   const [attendedClassesInput, setAttendedClassesInput] = useState<string>('');
+  const [totalClassesInput, setTotalClassesInput] = useState<string>('');
   const [upcomingClassesCountFormInput, setUpcomingClassesCountFormInput] = useState<string>(''); 
   
   const [calculatedCurrentTotal, setCalculatedCurrentTotal] = useState<number | null>(null);
@@ -83,16 +88,16 @@ export default function AttendancePage() {
   const [startDate, setStartDate] = useState<Date | undefined>();
   const [endDate, setEndDate] = useState<Date | undefined>();
   const [semesterEndDate, setSemesterEndDate] = useState<Date | undefined>();
-  const [extraInstructionalDays, setExtraInstructionalDays] = useState<string>("");
   const [selectedAssessment, setSelectedAssessment] = useState<string>('');
   
   const [weeklyTimetableFile, setWeeklyTimetableFile] = useState<File | null>(null);
-  const [academicCalendarFile, setAcademicCalendarFile] = useState<File | null>(null);
+  const [academicCalendarFiles, setAcademicCalendarFiles] = useState<File[]>([]);
 
   const [isProcessingSchedule, setIsProcessingSchedule] = useState(false);
   const [scheduleSummary, setScheduleSummary] = useState<string | null>(null);
   const [extractedClassDays, setExtractedClassDays] = useState<string[]>([]);
   const [nonInstructionalDays, setNonInstructionalDays] = useState<NonInstructionalDay[]>([]);
+  const [dayOrderInstructionalDays, setDayOrderInstructionalDays] = useState<DayOrderInstructionalDay[]>([]);
   const weeklyFileInputRef = useRef<HTMLInputElement>(null);
   const academicCalendarInputRef = useRef<HTMLInputElement>(null);
   const [isClient, setIsClient] = useState(false);
@@ -114,8 +119,14 @@ export default function AttendancePage() {
         const ref = referenceDate || new Date();
         const parsed = parse(dateString.trim(), fmt, ref);
         if (isValid(parsed)) {
+            // If format doesn't include year and the parsed date is in the past, assume next year
             if (!/yyyy/.test(fmt) && parsed < ref) {
-               parsed.setFullYear(ref.getFullYear() + 1);
+               // Check if it's really in the past, could be same year but earlier month
+               const today = new Date();
+               today.setHours(0,0,0,0);
+               if(parsed < today) {
+                  parsed.setFullYear(ref.getFullYear() + 1);
+               }
             }
             return parsed;
         }
@@ -142,76 +153,57 @@ export default function AttendancePage() {
     const classDayIndexes = extractedClassDays.map(day => weekdayMap[day.toLowerCase()]);
     const normalizedClassDays = extractedClassDays.map(day => day.toLowerCase());
 
-    const dayOrderClasses: Date[] = extraInstructionalDays
-        .split(/[\n,]+/)
-        .map(line => line.trim())
-        .filter(line => line)
-        .reduce((acc: Date[], line: string) => {
-            // E.g., "23.11.2024 Friday Day Order"
-            const parts = line.split(/\s+/);
-            const dateStr = parts[0];
-            const dayOrderStr = parts[1]?.toLowerCase();
+    const nonInstructionalDateSet = new Set<string>();
+    nonInstructionalDays.forEach(item => {
+        const dateStr = item.date.trim();
+        const rangeParts = dateStr.split(/\s+to\s+|-/);
+        try {
+            if (rangeParts.length > 1) { // It's a range
+                const refDate = startDate || new Date();
+                let startDateOfRange = parseDate(rangeParts[0], refDate);
+                let endDateOfRange = parseDate(rangeParts[1], refDate);
 
-            if (dateStr && dayOrderStr && normalizedClassDays.includes(dayOrderStr)) {
-                const date = parse(dateStr, 'dd.MM.yyyy', new Date());
-                if (isValid(date)) {
-                    acc.push(date);
+                if (startDateOfRange && endDateOfRange) {
+                    if (endDateOfRange.getFullYear() < startDateOfRange.getFullYear() || (endDateOfRange.getFullYear() === startDateOfRange.getFullYear() && endDateOfRange.getMonth() < startDateOfRange.getMonth())) {
+                        endDateOfRange.setFullYear(startDateOfRange.getFullYear());
+                    }
+                    if (isValid(startDateOfRange) && isValid(endDateOfRange) && endDateOfRange >= startDateOfRange) {
+                        const rangeDates = eachDayOfInterval({ start: startDateOfRange, end: endDateOfRange });
+                        rangeDates.forEach(d => nonInstructionalDateSet.add(format(d, 'yyyy-MM-dd')));
+                    }
+                } else {
+                     console.warn("Could not parse date range:", dateStr);
                 }
-            } else if (dateStr) { // Handle case where only date is provided
-                 const date = parse(dateStr, 'dd.MM.yyyy', new Date());
-                 if (isValid(date) && classDayIndexes.includes(getDay(date))) {
-                    acc.push(date);
-                 }
+            } else { // It's a single date
+                const singleDate = parseDate(dateStr, startDate);
+                if (singleDate && isValid(singleDate)) {
+                    nonInstructionalDateSet.add(format(singleDate, 'yyyy-MM-dd'));
+                }
             }
-            return acc;
-        }, []);
+        } catch(e) {
+             console.error("Error processing non-instructional day:", dateStr, e);
+        }
+    });
 
+    const dayOrderClasses: Date[] = dayOrderInstructionalDays
+      .reduce((acc: Date[], dayOrder) => {
+          const dayOrderDate = parseDate(dayOrder.date, startDate);
+          if (dayOrderDate && isValid(dayOrderDate) && normalizedClassDays.includes(dayOrder.dayOfWeek.toLowerCase())) {
+             if (!nonInstructionalDateSet.has(format(dayOrderDate, 'yyyy-MM-dd'))) {
+                acc.push(dayOrderDate);
+             }
+          }
+          return acc;
+      }, []);
 
     let regularClassDates: Date[] = [];
     if (startDate && endDate && extractedClassDays.length) {
        if (endDate >= startDate) {
            let allDates = eachDayOfInterval({ start: startDate, end: endDate });
-
-           const nonInstructionalDateSet = new Set<string>();
-            nonInstructionalDays.forEach(item => {
-                const dateStr = item.date.trim();
-                const rangeParts = dateStr.split(/\s+to\s+|-/);
-                try {
-                    if (rangeParts.length > 1) { // It's a range
-                        const refDate = startDate || new Date();
-                        const startDateOfRange = parseDate(rangeParts[0], refDate);
-                        let endDateOfRange = parseDate(rangeParts[1], refDate);
-
-                        if (startDateOfRange && endDateOfRange) {
-                            // Handle cases like "Sep 10-15" where year is missing for end date
-                            if (endDateOfRange < startDateOfRange) { 
-                                endDateOfRange.setMonth(startDateOfRange.getMonth());
-                                if(endDateOfRange < startDateOfRange) {
-                                    endDateOfRange.setFullYear(startDateOfRange.getFullYear() + 1);
-                                } else {
-                                    endDateOfRange.setFullYear(startDateOfRange.getFullYear());
-                                }
-                            }
-                            if (isValid(startDateOfRange) && isValid(endDateOfRange) && endDateOfRange >= startDateOfRange) {
-                                const rangeDates = eachDayOfInterval({ start: startDateOfRange, end: endDateOfRange });
-                                rangeDates.forEach(d => nonInstructionalDateSet.add(format(d, 'yyyy-MM-dd')));
-                            }
-                        } else {
-                             console.warn("Could not parse date range:", dateStr);
-                        }
-                    } else { // It's a single date
-                        const singleDate = parseDate(dateStr, startDate);
-                        if (singleDate && isValid(singleDate)) {
-                            nonInstructionalDateSet.add(format(singleDate, 'yyyy-MM-dd'));
-                        }
-                    }
-                } catch(e) {
-                     console.error("Error processing non-instructional day:", dateStr, e);
-                }
-            });
     
             allDates = allDates.filter(date => !nonInstructionalDateSet.has(format(date, 'yyyy-MM-dd')));
 
+            // Filter for regular weekdays
             regularClassDates = allDates.filter(date => classDayIndexes.includes(getDay(date)));
        }
     }
@@ -220,13 +212,13 @@ export default function AttendancePage() {
     const combinedDates = [...regularClassDates, ...dayOrderClasses];
     const uniqueDates = Array.from(new Set(combinedDates.map(d => d.getTime()))).map(time => new Date(time));
 
-    setSelectedDays(uniqueDates);
+    setSelectedDays(uniqueDates.sort((a, b) => a.getTime() - b.getTime()));
   };
   
   // This effect will run when the core data for calculation changes.
   useEffect(() => {
     calculateAndSetSelectedDays();
-  }, [startDate, endDate, extractedClassDays, nonInstructionalDays, extraInstructionalDays]);
+  }, [startDate, endDate, extractedClassDays, nonInstructionalDays, dayOrderInstructionalDays]);
 
 
   const resetCurrentResults = () => {
@@ -251,6 +243,7 @@ export default function AttendancePage() {
       setExtractedClassDays([]);
       setSelectedDays([]);
       setNonInstructionalDays([]);
+      setDayOrderInstructionalDays([]);
       setSemesterEndDate(undefined);
       setStartDate(undefined);
       setEndDate(undefined);
@@ -263,11 +256,10 @@ export default function AttendancePage() {
     setTotalClassesInput('');
     setAttendedClassesInput('');
     setUpcomingClassesCountFormInput('');
-    setExtraInstructionalDays('');
     
     // Reset files
     setWeeklyTimetableFile(null);
-    setAcademicCalendarFile(null);
+    setAcademicCalendarFiles([]);
     if (weeklyFileInputRef.current) weeklyFileInputRef.current.value = '';
     if (academicCalendarInputRef.current) academicCalendarInputRef.current.value = '';
 
@@ -300,20 +292,21 @@ export default function AttendancePage() {
       return;
     }
 
+    if (attendedTillDate < 0) {
+      setError("Classes attended cannot be negative.");
+      return;
+    }
+
+    if (attendedTillDate > totalHeld) {
+      setError("Classes attended cannot exceed total classes held.");
+      return;
+    }
+
     if (totalHeld <= 0) {
       setError("Total classes held must be a positive number.");
       return;
     }
 
-    if (attendedTillDate < 0) {
-      setError("Classes attended (till date) cannot be negative.");
-      return;
-    }
-
-    if (attendedTillDate > totalHeld) {
-      setError("Classes attended (till date) cannot exceed total classes held.");
-      return;
-    }
 
     if (upcomingClassesCountFormInput && (debarClassesLeft === null || isNaN(debarClassesLeft) || debarClassesLeft < 0)) {
       setError("Classes left for debar calculation must be a valid non-negative number if provided.");
@@ -379,6 +372,22 @@ export default function AttendancePage() {
     setFile(file);
     resetAiResults();
   };
+  
+  const handleMultipleFileChange = (e: ChangeEvent<HTMLInputElement>, setFiles: (files: File[]) => void) => {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    if (files.length > 8) {
+      toast({
+        variant: "destructive",
+        title: "Too many files",
+        description: "You can select a maximum of 8 files.",
+      });
+      // Optionally clear the input
+      if (e.target) e.target.value = '';
+    } else {
+      setFiles(files);
+      resetAiResults();
+    }
+  };
 
   const handleProcessSchedule = async () => {
     if (!weeklyTimetableFile) {
@@ -389,11 +398,11 @@ export default function AttendancePage() {
         });
         return;
     }
-    if (!academicCalendarFile) {
+    if (academicCalendarFiles.length === 0) {
         toast({
             variant: "destructive",
             title: "Missing Calendar",
-            description: "Please upload the academic calendar PDF.",
+            description: "Please upload the academic calendar images.",
         });
         return;
     }
@@ -410,11 +419,11 @@ export default function AttendancePage() {
 
     try {
         const weeklyTimetableDataUri = await fileToDataUri(weeklyTimetableFile);
-        const academicCalendarDataUri = await fileToDataUri(academicCalendarFile);
+        const academicCalendarDataUris = await Promise.all(academicCalendarFiles.map(fileToDataUri));
 
         const result: ProcessScheduleOutput = await processSchedule({
             weeklyTimetableDataUri,
-            academicCalendarDataUri,
+            academicCalendarDataUris,
             courseCode: courseName,
         });
         
@@ -438,6 +447,10 @@ export default function AttendancePage() {
 
         if (result.nonInstructionalDays && result.nonInstructionalDays.length > 0) {
             setNonInstructionalDays(result.nonInstructionalDays);
+        }
+
+        if (result.dayOrderInstructionalDays && result.dayOrderInstructionalDays.length > 0) {
+            setDayOrderInstructionalDays(result.dayOrderInstructionalDays);
         }
         
         if (result.lastInstructionalDay) {
@@ -548,21 +561,29 @@ export default function AttendancePage() {
                     </div>
 
                     <div className="space-y-2">
-                        <Label htmlFor="academic-calendar">2. Academic Calendar (PDF)</Label>
+                        <Label htmlFor="academic-calendar">2. Academic Calendar</Label>
                         <Input 
                           id="academic-calendar" 
                           type="file" 
+                          multiple
                           ref={academicCalendarInputRef}
-                          onChange={(e) => handleFileChange(e, setAcademicCalendarFile)}
-                          accept=".pdf"
+                          onChange={(e) => handleMultipleFileChange(e, setAcademicCalendarFiles)}
+                          accept=".png,.jpg,.jpeg"
                           className="file:text-primary file:font-semibold"
                         />
-                         {academicCalendarFile && <p className="text-xs text-muted-foreground">Selected: {academicCalendarFile.name}</p>}
+                         {academicCalendarFiles.length > 0 && (
+                            <div className="text-xs text-muted-foreground space-y-1 mt-1">
+                                <p className="font-medium">Selected files ({academicCalendarFiles.length}):</p>
+                                <ul className="list-disc pl-4">
+                                    {academicCalendarFiles.map((file, index) => <li key={index}>{file.name}</li>)}
+                                </ul>
+                            </div>
+                         )}
                     </div>
                     
                     {scheduleSummary && <p className="text-sm text-muted-foreground font-medium pt-2">{scheduleSummary}</p>}
 
-                    <Button onClick={handleProcessSchedule} disabled={isProcessingSchedule || !weeklyTimetableFile || !academicCalendarFile} className="w-full">
+                    <Button onClick={handleProcessSchedule} disabled={isProcessingSchedule || !weeklyTimetableFile || academicCalendarFiles.length === 0} className="w-full">
                         {isProcessingSchedule ? <Loader2 className="animate-spin" /> : <BrainCircuit />}
                         {isProcessingSchedule ? 'Processing...' : 'Process Schedule with AI'}
                     </Button>
@@ -614,11 +635,29 @@ export default function AttendancePage() {
                               />
                             </PopoverContent>
                           </Popover>
-                          {endDate && (
-                             <div className="flex items-center justify-center p-2 border rounded-md text-sm">
-                                {`End Date: ${format(endDate, "PPP")}`}
-                             </div>
-                          )}
+                           <Popover>
+                            <PopoverTrigger asChild>
+                              <Button
+                                variant={"outline"}
+                                className={cn(
+                                  "w-full justify-start text-left font-normal",
+                                  !endDate && "text-muted-foreground"
+                                )}
+                              >
+                                <CalendarIcon className="mr-2 h-4 w-4" />
+                                {endDate ? format(endDate, "PPP") : <span>Pick an end date</span>}
+                              </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-auto p-0">
+                              <Calendar
+                                mode="single"
+                                selected={endDate}
+                                onSelect={handleEndDateChange}
+                                initialFocus
+                                disabled={isProcessingSchedule || (semesterEndDate ? { after: semesterEndDate } : undefined)}
+                              />
+                            </PopoverContent>
+                          </Popover>
                         </div>
                     </div>
                     
@@ -637,27 +676,6 @@ export default function AttendancePage() {
                         </Select>
                     </div>
 
-                    <div className="space-y-2">
-                        <Label htmlFor="extra-instructional-days">4. Extra Instructional Days</Label>
-                         <div className="flex items-center gap-2">
-                            <Textarea
-                              id="extra-instructional-days"
-                              placeholder="e.g., 23.11.2024 Friday Day Order. Enter one per line."
-                              value={extraInstructionalDays}
-                              onChange={(e) => setExtraInstructionalDays(e.target.value)}
-                              className="bg-secondary/70 border-border focus:ring-primary focus:border-primary flex-grow"
-                            />
-                            <Button 
-                              variant="outline" 
-                              size="icon" 
-                              onClick={calculateAndSetSelectedDays} 
-                              aria-label="Update calendar with extra days"
-                              className="flex-shrink-0"
-                            >
-                                <RefreshCw className="h-4 w-4" />
-                            </Button>
-                        </div>
-                    </div>
                 </CardContent>
 
                 <Separator className="my-4" />
@@ -694,7 +712,7 @@ export default function AttendancePage() {
                 <CardHeader className="text-center bg-card p-6 border-b border-border">
                 <div className="mx-auto mb-3 w-fit">
                    <Image
-                      src="/icon.png"
+                      src="/app-logo.png"
                       alt="Attendance Ally Logo"
                       width={48}
                       height={48}
@@ -708,20 +726,6 @@ export default function AttendancePage() {
                 </CardHeader>
                 <CardContent className="p-6 bg-card">
                 <form onSubmit={handleCalculate} className="space-y-5">
-                    
-                    <div className="space-y-2">
-                    <Label htmlFor="totalClassesHeld" className="text-foreground font-medium text-sm">Total Classes Held</Label>
-                    <Input
-                        id="totalClassesHeld"
-                        type="number"
-                        placeholder="e.g., 80"
-                        value={totalClassesInput}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => setTotalClassesInput(e.target.value)}
-                        min="1"
-                        required
-                        className="bg-secondary/70 border-border focus:ring-primary focus:border-primary"
-                    />
-                    </div>
                     <div className="space-y-2">
                     <Label htmlFor="attendedClassesTillDate" className="text-foreground font-medium text-sm">Classes Attended (till date)</Label>
                     <Input
@@ -735,6 +739,20 @@ export default function AttendancePage() {
                         className="bg-secondary/70 border-border focus:ring-primary focus:border-primary"
                     />
                     </div>
+                    <div className="space-y-2">
+                    <Label htmlFor="totalClassesHeld" className="text-foreground font-medium text-sm">Total Classes Held</Label>
+                    <Input
+                        id="totalClassesHeld"
+                        type="number"
+                        placeholder="e.g., 80"
+                        value={totalClassesInput}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => setTotalClassesInput(e.target.value)}
+                        min="1"
+                        required
+                        className="bg-secondary/70 border-border focus:ring-primary focus:border-primary"
+                    />
+                    </div>
+                    
                     <div className="space-y-2">
                     <Label htmlFor="classesLeftForDebar" className="text-foreground font-medium text-sm">Classes left before Debar calculation</Label>
                     <Input
@@ -896,8 +914,3 @@ export default function AttendancePage() {
     </div>
   );
 }
-
-
-    
-
-    
