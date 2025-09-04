@@ -188,14 +188,17 @@ export default function AttendancePage() {
     const dayOrderClasses: Date[] = dayOrderInstructionalDays
       .reduce((acc: Date[], dayOrder) => {
           const dayOrderDate = parseDate(dayOrder.date, startDate);
-          if (dayOrderDate && isValid(dayOrderDate) && normalizedClassDays.includes(dayOrder.dayOfWeek.toLowerCase())) {
-             if (!nonInstructionalDateSet.has(format(dayOrderDate, 'yyyy-MM-dd'))) {
-                acc.push(dayOrderDate);
-             }
+          if (
+              dayOrderDate && isValid(dayOrderDate) && // Is a valid date
+              normalizedClassDays.includes(dayOrder.dayOfWeek.toLowerCase()) && // Is a class day
+              !nonInstructionalDateSet.has(format(dayOrderDate, 'yyyy-MM-dd')) && // Is not a holiday
+              startDate && endDate && dayOrderDate >= startDate && dayOrderDate <= endDate // <-- THIS IS THE ADDED LINE
+          ) {
+             acc.push(dayOrderDate);
           }
           return acc;
       }, []);
-
+    
     let regularClassDates: Date[] = [];
     if (startDate && endDate && extractedClassDays.length) {
        if (endDate >= startDate) {
